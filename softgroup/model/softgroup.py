@@ -56,6 +56,7 @@ class SoftGroup(nn.Module):
         # point-wise prediction
         self.semantic_linear = MLP(channels, semantic_classes, norm_fn=norm_fn, num_layers=2)
         self.offset_linear = MLP(channels, 3, norm_fn=norm_fn, num_layers=2)
+        self.mask_linear = MLP(channels, channels * 2, norm_fn=norm_fn, num_layers=2) # TODO 暂时设置输出维度为64
 
         # topdown refinement path
         if not semantic_only:
@@ -106,7 +107,7 @@ class SoftGroup(nn.Module):
         feats = torch.cat((feats, coords_float), 1)
         voxel_feats = voxelization(feats, p2v_map)
         input = spconv.SparseConvTensor(voxel_feats, voxel_coords.int(), spatial_shape, batch_size)
-        semantic_scores, pt_offsets, output_feats = self.forward_backbone(input, v2p_map)
+        semantic_scores, pt_offsets, mask_feats, output_feats = self.forward_backbone(input, v2p_map)
 
         # point wise losses
         point_wise_loss = self.point_wise_loss(semantic_scores, pt_offsets, semantic_labels,
@@ -224,7 +225,7 @@ class SoftGroup(nn.Module):
         feats = torch.cat((feats, coords_float), 1)
         voxel_feats = voxelization(feats, p2v_map)
         input = spconv.SparseConvTensor(voxel_feats, voxel_coords.int(), spatial_shape, batch_size)
-        semantic_scores, pt_offsets, output_feats = self.forward_backbone(
+        semantic_scores, pt_offsets, mask_feats, output_feats = self.forward_backbone(
             input, v2p_map, x4_split=self.test_cfg.x4_split)
         if self.test_cfg.x4_split:
             coords_float = self.merge_4_parts(coords_float)
@@ -266,7 +267,8 @@ class SoftGroup(nn.Module):
 
         semantic_scores = self.semantic_linear(output_feats)
         pt_offsets = self.offset_linear(output_feats)
-        return semantic_scores, pt_offsets, output_feats
+        mask_feats = self.mask_linear(output_feats)
+        return semantic_scores, pt_offsets, mask_feats, output_feats 
 
     def forward_4_parts(self, x, input_map):
         """Helper function for s3dis: devide and forward 4 parts of a scene."""
