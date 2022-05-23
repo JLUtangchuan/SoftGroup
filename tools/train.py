@@ -1,6 +1,7 @@
 import argparse
 import datetime
 import os
+import sys
 import os.path as osp
 import shutil
 import time
@@ -8,6 +9,9 @@ import time
 import torch
 import yaml
 from munch import Munch
+
+sys.path.append('./')
+
 from softgroup.data import build_dataloader, build_dataset
 from softgroup.evaluation import (ScanNetEval, evaluate_offset_mae, evaluate_semantic_acc,
                                   evaluate_semantic_miou)
@@ -89,7 +93,7 @@ def validate(epoch, model, val_loader, cfg, logger, writer):
     progress_bar = tqdm(total=len(val_loader) * world_size, disable=not is_main_process())
     val_set = val_loader.dataset
     with torch.no_grad():
-        model = model.eval()
+        model.eval()
         for i, batch in enumerate(val_loader):
             result = model(batch)
             results.append(result)
