@@ -20,7 +20,7 @@ def batch_dice_loss(inputs, targets):
                 (0 for the negative class and 1 for the positive class).
     """
     inputs = inputs.sigmoid()
-    inputs = inputs.flatten(1)
+    # inputs = inputs.flatten(1)
     numerator = 2 * torch.einsum("nc,mc->nm", inputs, targets)
     denominator = inputs.sum(-1)[:, None] + targets.sum(-1)[None, :]
     loss = 1 - (numerator + 1) / (denominator + 1)
@@ -88,36 +88,37 @@ class HungarianMatcher(nn.Module):
     @torch.no_grad()
     def memory_efficient_forward(self, outputs, targets):
         """More memory-friendly matching"""
-        bs, num_queries = outputs["pred_logits"].shape[:2]
+        # bs, num_queries = outputs["pred_logits"].shape[:2]
+        bs = len(outputs["pred_logits"])
+        num_queries = outputs["pred_logits"][0].size(0)
 
         # Work out the mask padding size
-        masks = [v["masks"] for v in targets]
-        h_max = max([m.shape[1] for m in masks])
-        w_max = max([m.shape[2] for m in masks])
+        # masks = [v["masks"] for v in targets]
+        # h_max = max([m.shape[1] for m in masks])
+        # w_max = max([m.shape[2] for m in masks])
 
         indices = []
-
+        
         # Iterate through batch size
         for b in range(bs):
 
             out_prob = outputs["pred_logits"][b].softmax(-1)  # [num_queries, num_classes]
-            out_mask = outputs["pred_masks"][b]  # [num_queries, H_pred, W_pred]
+            out_mask = outputs["pred_masks"][b].transpose(0, 1)  # [num_queries, n_points]
 
-            tgt_ids = targets[b]["labels"]
+            tgt_ids = targets["labels"][b]
             # gt masks are already padded when preparing target
-            tgt_mask = targets[b]["masks"].to(out_mask)
-
+            tgt_mask = targets["masks"][b].transpose(0, 1).to(out_mask)
             # Compute the classification cost. Contrary to the loss, we don't use the NLL,
             # but approximate it in 1 - proba[target class].
             # The 1 is a constant that doesn't change the matching, it can be ommitted.
             cost_class = -out_prob[:, tgt_ids]
 
             # Downsample gt masks to save memory
-            tgt_mask = F.interpolate(tgt_mask[:, None], size=out_mask.shape[-2:], mode="nearest")
+            # tgt_mask = F.interpolate(tgt_mask[:, None], size=out_mask.shape[-2:], mode="nearest")
 
             # Flatten spatial dimension
-            out_mask = out_mask.flatten(1)  # [batch_size * num_queries, H*W]
-            tgt_mask = tgt_mask[:, 0].flatten(1)  # [num_total_targets, H*W]
+            # out_mask = out_mask.flatten(1)  # [batch_size * num_queries, H*W]
+            # tgt_mask = tgt_mask[:, 0].flatten(1)  # [num_total_targets, H*W]
 
             # Compute the focal loss between masks
             cost_mask = batch_sigmoid_focal_loss(out_mask, tgt_mask)
@@ -172,3 +173,31 @@ class HungarianMatcher(nn.Module):
         _repr_indent = 4
         lines = [head] + [" " * _repr_indent + line for line in body]
         return "\n".join(lines)
+
+
+def sigmoid_focal_loss(inputs, targets, num_masks, alpha: float = 0.25, gamma: float = 2):
+    """
+    Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
+    Args:
+        inputs: A float tensor of arbitrary shape.
+                The predictions for each example.
+        targets: A float tensor with the same shape as inputs. Stores the binary
+                 classification label for each element in inputs
+                (0 for the negative class and 1 for the positive class).
+        alpha: (optional) Weighting factor in range (0,1) to balance
+                positive vs negative examples. Default = -1 (no weighting).
+        gamma: Exponent of the modulating factor (1 - p_t) to
+               balance easy vs hard examples.
+    Returns:
+        Loss tensor
+    """
+    prob = inputs.sigmoid()
+    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    p_t = prob * targets + (1 - prob) * (1 - targets)
+    loss = ce_loss * ((1 - p_t) ** gamma)
+
+    if alpha >= 0:
+        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+        loss = alpha_t * loss
+
+    return loss.mean(0).sum() / num_masks

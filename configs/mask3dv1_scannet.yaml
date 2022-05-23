@@ -4,9 +4,10 @@ model:
   semantic_classes: 20
   instance_classes: 18
   sem2ins_classes: []
-  semantic_only: False
+  semantic_only: True
   ignore_label: -100
-  mask_idm: 96
+  mask_dim: 64
+  mask_thr: 0.2
   grouping_cfg:
     score_thr: 0.2
     radius: 0.04
@@ -25,10 +26,10 @@ model:
     pos_iou_thr: 0.5
   test_cfg:
     x4_split: False
-    cls_score_thr: 0.001
-    mask_score_thr: -0.5
+    cls_score_thr: 0.3
+    mask_score_thr: 0.1
     min_npoint: 100
-  fixed_modules: ['input_conv', 'unet', 'output_layer', 'semantic_linear', 'offset_linear']
+  fixed_modules: []
 
 data:
   train:
@@ -65,7 +66,7 @@ dataloader:
 
 optimizer:
   type: 'Adam'
-  lr: 0.004
+  lr: 0.01
 
 save_cfg:
   semantic: True
@@ -73,8 +74,8 @@ save_cfg:
   instance: True
 
 fp16: False
-epochs: 128
+epochs: 500
 step_epoch: 50
 save_freq: 4
-pretrain: './exp/hais_ckpt_spconv2.pth'
+pretrain: False
 work_dir: ''

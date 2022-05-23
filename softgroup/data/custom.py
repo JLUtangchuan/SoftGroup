@@ -38,6 +38,7 @@ class CustomDataset(Dataset):
         filenames = glob(osp.join(self.data_root, self.prefix, '*' + self.suffix))
         assert len(filenames) > 0, 'Empty dataset.'
         filenames = sorted(filenames * self.repeat)
+        filenames = filenames[:20]
         return filenames
 
     def load(self, filename):
@@ -192,6 +193,7 @@ class CustomDataset(Dataset):
 
         instance_pointnum = []  # (total_nInst), int
         instance_cls = []  # (total_nInst), long
+        instance_idx = []  # (total_nInst), long
         pt_offset_labels = []
 
         total_inst_num = 0
@@ -211,6 +213,7 @@ class CustomDataset(Dataset):
             instance_labels.append(instance_label)
             instance_pointnum.extend(inst_pointnum)
             instance_cls.extend(inst_cls)
+            instance_idx.extend([batch_id] * len(inst_cls))
             pt_offset_labels.append(pt_offset_label)
             batch_id += 1
         assert batch_id > 0, 'empty batch'
@@ -226,6 +229,7 @@ class CustomDataset(Dataset):
         instance_labels = torch.cat(instance_labels, 0).long()  # long (N)
         instance_pointnum = torch.tensor(instance_pointnum, dtype=torch.int)  # int (total_nInst)
         instance_cls = torch.tensor(instance_cls, dtype=torch.long)  # long (total_nInst)
+        instance_idx = torch.tensor(instance_idx, dtype=torch.long)  # long (total_nInst)
         pt_offset_labels = torch.cat(pt_offset_labels).float()
 
         spatial_shape = np.clip(
@@ -246,5 +250,6 @@ class CustomDataset(Dataset):
             'instance_cls': instance_cls,
             'pt_offset_labels': pt_offset_labels,
             'spatial_shape': spatial_shape,
+            'instance_batch_idxs': instance_idx,
             'batch_size': batch_id,
         }
