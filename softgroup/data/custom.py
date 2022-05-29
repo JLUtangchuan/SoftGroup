@@ -38,7 +38,6 @@ class CustomDataset(Dataset):
         filenames = glob(osp.join(self.data_root, self.prefix, '*' + self.suffix))
         assert len(filenames) > 0, 'Empty dataset.'
         filenames = sorted(filenames * self.repeat)
-        filenames = filenames[:20]
         return filenames
 
     def load(self, filename):

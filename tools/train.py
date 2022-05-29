@@ -93,7 +93,7 @@ def validate(epoch, model, val_loader, cfg, logger, writer):
     progress_bar = tqdm(total=len(val_loader) * world_size, disable=not is_main_process())
     val_set = val_loader.dataset
     with torch.no_grad():
-        model.eval()
+        model.train()
         for i, batch in enumerate(val_loader):
             result = model(batch)
             results.append(result)
@@ -102,10 +102,10 @@ def validate(epoch, model, val_loader, cfg, logger, writer):
         results = collect_results_gpu(results, len(val_set))
     if is_main_process():
         for res in results:
-            all_sem_preds.append(res['semantic_preds'])
-            all_sem_labels.append(res['semantic_labels'])
-            all_offset_preds.append(res['offset_preds'])
-            all_offset_labels.append(res['offset_labels'])
+            # all_sem_preds.append(res['semantic_preds'])
+            # all_sem_labels.append(res['semantic_labels'])
+            # all_offset_preds.append(res['offset_preds'])
+            # all_offset_labels.append(res['offset_labels'])
             all_inst_labels.append(res['instance_labels'])
             if not cfg.model.semantic_only:
                 all_pred_insts.append(res['pred_instances'])
@@ -117,14 +117,14 @@ def validate(epoch, model, val_loader, cfg, logger, writer):
             writer.add_scalar('val/AP', eval_res['all_ap'], epoch)
             writer.add_scalar('val/AP_50', eval_res['all_ap_50%'], epoch)
             writer.add_scalar('val/AP_25', eval_res['all_ap_25%'], epoch)
-        logger.info('Evaluate semantic segmentation and offset MAE')
-        miou = evaluate_semantic_miou(all_sem_preds, all_sem_labels, cfg.model.ignore_label, logger)
-        acc = evaluate_semantic_acc(all_sem_preds, all_sem_labels, cfg.model.ignore_label, logger)
-        mae = evaluate_offset_mae(all_offset_preds, all_offset_labels, all_inst_labels,
-                                  cfg.model.ignore_label, logger)
-        writer.add_scalar('val/mIoU', miou, epoch)
-        writer.add_scalar('val/Acc', acc, epoch)
-        writer.add_scalar('val/Offset MAE', mae, epoch)
+        # logger.info('Evaluate semantic segmentation and offset MAE')
+        # miou = evaluate_semantic_miou(all_sem_preds, all_sem_labels, cfg.model.ignore_label, logger)
+        # acc = evaluate_semantic_acc(all_sem_preds, all_sem_labels, cfg.model.ignore_label, logger)
+        # mae = evaluate_offset_mae(all_offset_preds, all_offset_labels, all_inst_labels,
+        #                           cfg.model.ignore_label, logger)
+        # writer.add_scalar('val/mIoU', miou, epoch)
+        # writer.add_scalar('val/Acc', acc, epoch)
+        # writer.add_scalar('val/Offset MAE', mae, epoch)
 
 
 def main():

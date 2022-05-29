@@ -11,7 +11,7 @@ from ..ops import (ballquery_batch_p, bfs_cluster, get_mask_iou_on_cluster, get_
                    voxelization_idx)
 from ..util import cuda_cast, force_fp32, rle_encode
 from .blocks import MLP, ResidualBlock, UBlock
-from .losses import HungarianMatcher, sigmoid_focal_loss
+from .losses import HungarianMatcher, sigmoid_focal_loss, dice_loss
 from ..util.debug import varChecker # debug Tools
 
 class SoftGroup(nn.Module):
@@ -30,6 +30,8 @@ class SoftGroup(nn.Module):
                  test_cfg=None,
                  mask_thr=0.2,
                  mask_dim=64,
+                 kernel_dim=64,
+                 norm_feat=False,
                  fixed_modules=[]):
         super().__init__()
         self.channels = channels
@@ -46,6 +48,8 @@ class SoftGroup(nn.Module):
         self.fixed_modules = fixed_modules
         self.mask_thr = mask_thr
         self.mask_dim = mask_dim
+        self.kernel_dim = kernel_dim
+        self.norm_feat = norm_feat
 
         block = ResidualBlock
         norm_fn = functools.partial(nn.BatchNorm1d, eps=1e-4, momentum=0.1)
@@ -58,21 +62,15 @@ class SoftGroup(nn.Module):
         self.unet = UBlock(block_channels, norm_fn, 2, block, indice_key_id=1)
         self.output_layer = spconv.SparseSequential(norm_fn(channels), nn.ReLU())
 
-        # point-wise prediction
-        self.semantic_linear = MLP(channels, semantic_classes, norm_fn=norm_fn, num_layers=2)
-        self.offset_linear = MLP(channels, 3, norm_fn=norm_fn, num_layers=2)
-        self.mask_linear = MLP(channels, self.mask_dim, norm_fn=norm_fn, num_layers=2)
 
         # matcher
-        self.matcher = HungarianMatcher()
+        self.matcher = HungarianMatcher(cost_dice = 10.0)
 
         # topdown refinement path
-        # if not semantic_only:
-        #     self.tiny_unet = UBlock([channels, 2 * channels], norm_fn, 2, block, indice_key_id=11)
-        #     self.tiny_unet_outputlayer = spconv.SparseSequential(norm_fn(channels), nn.ReLU())
-        #     self.cls_linear = nn.Linear(channels, instance_classes + 1)
-        #     self.mask_linear = MLP(channels, instance_classes + 1, norm_fn=None, num_layers=2)
-        #     self.iou_score_linear = nn.Linear(channels, instance_classes + 1)
+        if not semantic_only:
+            self.mask_linear = MLP(channels, self.mask_dim, norm_fn=norm_fn, num_layers=3)
+            self.kernel_linear = MLP(channels, self.kernel_dim, norm_fn=norm_fn, num_layers=3)
+            self.cls_linear = MLP(channels, self.instance_classes + 1, norm_fn=norm_fn, num_layers=2)
 
         self.init_weights()
 
@@ -115,17 +113,20 @@ class SoftGroup(nn.Module):
         feats = torch.cat((feats, coords_float), 1)
         voxel_feats = voxelization(feats, p2v_map)
         input = spconv.SparseConvTensor(voxel_feats, voxel_coords.int(), spatial_shape, batch_size)
-        semantic_scores, pt_offsets, mask_feats, output_feats = self.forward_backbone(input, v2p_map)
+        kernel_feats, mask_feats, output_feats = self.forward_backbone(input, v2p_map)
 
-        # point wise losses
-        point_wise_loss = self.point_wise_loss(semantic_scores, pt_offsets, semantic_labels,
-                                               instance_labels, pt_offset_labels)
-        losses.update(point_wise_loss)
 
         # instance losses
         if not self.semantic_only:
-            instance_loss = self.instance_loss_for_mask(mask_feats, semantic_scores, 
-                                                        instance_labels, instance_pointnum, 
+            # acquire mask, cls, score
+            # ins feat -> bs nProposals, nDim
+            # cls_scores -> bs nProposals, nClasses
+            cls_scores, instance_feats = self.get_instance_features(kernel_feats, output_feats, batch_idxs, batch_size)
+            # mask -> bs * nPoints, nProposal
+            mask_preds = self.get_mask_preds(instance_feats, mask_feats, batch_idxs)
+
+            instance_loss = self.instance_loss_for_mask(mask_preds, cls_scores, 
+                                                        instance_labels, 
                                                         instance_cls, batch_idxs, 
                                                         batch_size, instance_batch_idxs)
             losses.update(instance_loss)
@@ -147,10 +148,49 @@ class SoftGroup(nn.Module):
         losses['offset_loss'] = offset_loss
         return losses
     
+    @force_fp32(apply_to=('kernel_feats', 'output_feats'))
+    def get_instance_features(self, kernel_feats, output_feats, batch_idxs, batch_size):
+        """
+        cls: bs, nProposals, nClasses
+        ins_feats: bs * nProposals, nDim
+        """
+        instance_feats = []
 
-    @force_fp32(apply_to=('mask_feats', 'semantic_scores'))
-    def instance_loss_for_mask(self, mask_feats, semantic_scores, 
-                               instance_labels, instance_pointnum, 
+        for i in range(batch_size):
+            batch_id_mask = batch_idxs == i
+            kernel_feats = kernel_feats * batch_id_mask.unsqueeze(1)
+            i_kernel_feats = kernel_feats.masked_fill(~batch_id_mask.unsqueeze(1), 0.) # nPoints, nProposals
+            i_output_feats = output_feats.masked_fill(~batch_id_mask.unsqueeze(1), 0.) # nPoints, nDim
+            i_ins_feats = torch.mm(i_kernel_feats.transpose(1, 0), i_output_feats) # nProposals, nDim
+            if self.norm_feat:
+                i_ins_feats = F.normalize(i_ins_feats, p=2, dim=1)
+            instance_feats.append(i_ins_feats)
+        instance_feats = torch.cat(instance_feats, dim=0) # bs, nProposals, nDim
+        cls_scores = self.cls_linear(instance_feats) 
+        instance_feats = instance_feats.reshape(batch_size, self.kernel_dim, -1)
+        cls_scores = cls_scores.reshape(batch_size, self.kernel_dim, -1)
+        
+        return cls_scores, instance_feats
+
+    @force_fp32(apply_to=('instance_feats', 'mask_feats'))
+    def get_mask_preds(self, instance_feats, mask_feats, batch_idxs):
+        """
+        instance_feats: bs, nProposals, nDim
+        mask_feats: bs * nPoints, nDim
+        mask_preds: bs * nPoints, nProposal
+        """
+        bs = instance_feats.shape[0]
+        instance_feats_ = instance_feats.transpose(1, 2)
+        mask_preds = mask_feats.new_full((mask_feats.shape[0], instance_feats.shape[1]), 0.)
+        for i in range(bs):
+            i_batch_idxs = batch_idxs == i
+            i_mask_pred = torch.mm(mask_feats[i_batch_idxs, :], instance_feats_[i])
+            mask_preds[i_batch_idxs, :] = i_mask_pred
+        return mask_preds
+
+    @force_fp32(apply_to=('mask_preds', 'cls_scores'))
+    def instance_loss_for_mask(self, mask_preds, cls_scores, 
+                               instance_labels, 
                                instance_cls, batch_idxs, 
                                batch_size, instance_batch_idxs):
         batch_pred_logits_list = []
@@ -158,53 +198,37 @@ class SoftGroup(nn.Module):
         batch_gt_ins_labels_list = []
         batch_gt_masks_list = []
 
-
-        # ignore contain two individual parts: 1. ins ignore (instance_labels == -100) 2. semantic ignore (instance_cls == -1)
-        ignore_labels = torch.where(instance_cls == self.ignore_label)[0]
-        ignore_mask = instance_labels == self.ignore_label
-        for ig in ignore_labels:
-            ignore_mask = torch.bitwise_or(instance_labels == ig, ignore_mask)
-
-        n_batch = 0
-        for i in range(batch_size):
-            # point/instance batch index unpack
-            # ignore bg cls
-            i_indices_mask = torch.bitwise_and(batch_idxs == i, 
-                                               ~ignore_mask)
-            i_ins_indices_mask = torch.bitwise_and(instance_batch_idxs == i, 
-                                                   instance_cls != self.ignore_label)
-
-            if i_indices_mask.sum() > 0 and i_ins_indices_mask.sum() > 0:
-                i_ins_label = instance_labels[i_indices_mask]
-                i_mask_feat = mask_feats[i_indices_mask]
-                i_semantic_score = semantic_scores[i_indices_mask]
-                i_ins_cls = instance_cls[i_ins_indices_mask] + self.semantic_classes - self.instance_classes
-
-
-                unique_ins_label = i_ins_label.unique()
-                i_ins_label_mask = []
-                for ins_label_id in unique_ins_label:
-                    i_ins_label_mask.append(i_ins_label == ins_label_id)
-                i_ins_label_mask = torch.stack(i_ins_label_mask, 1).to(i_mask_feat)
-
-
-                # softmax -> n_point, n_classes
-                # i_semantic_score = F.softmax(i_semantic_score)
-
-                # n_point, n_proposal
-                proposal_bin_mask = torch.where(i_mask_feat.sigmoid() > self.mask_thr, 1., 0.).to(i_mask_feat)
-                proposal_bin_mask = F.normalize(proposal_bin_mask, p = 1, dim = 0)
-                
-                # n_proposal, n_classes
-                proposal_ins_cls_score = torch.mm(proposal_bin_mask.transpose(1, 0), i_semantic_score)
-
-                # collect batch data
-                batch_pred_logits_list.append(proposal_ins_cls_score)
-                batch_pred_masks_list.append(i_mask_feat)
-                batch_gt_ins_labels_list.append(i_ins_cls)
-                batch_gt_masks_list.append(i_ins_label_mask)
-                n_batch += 1
+        # filter out background instances
+        fg_inds = (instance_cls != self.ignore_label)
+        fg_inds_ = torch.where(instance_cls != self.ignore_label)[0]
+        fg_instance_cls = instance_cls[fg_inds]
+        fg_instance_batch_idxs = instance_batch_idxs[fg_inds]
+        fg_mask_gt = mask_preds.new_full((instance_labels.shape[0], fg_inds_.shape[0]), 0.)
         
+        for i in range(fg_inds_.size(0)):
+            fg_mask_gt[instance_labels == fg_inds_[i], i] = 1.
+
+        for i in range(batch_size):
+            i_indices_mask = batch_idxs == i
+            i_ins_indices_mask = fg_instance_batch_idxs == i
+
+            i_mask_pred = mask_preds[i_indices_mask, :]
+            i_cls_pred = cls_scores[i]
+            i_ins_cls = fg_instance_cls[i_ins_indices_mask]
+            i_mask_gt = fg_mask_gt[i_indices_mask, :][:, i_ins_indices_mask]
+
+
+
+
+            batch_pred_logits_list.append(i_cls_pred)
+            batch_pred_masks_list.append(i_mask_pred)
+
+
+            batch_gt_ins_labels_list.append(i_ins_cls)
+            batch_gt_masks_list.append(i_mask_gt)
+            assert i_ins_cls.shape[0] == i_mask_gt.shape[1]
+
+        assert len(batch_pred_logits_list) == len(batch_gt_ins_labels_list)
         matcher_data = {
             "outputs": {
                 "pred_logits" : batch_pred_logits_list,
@@ -215,7 +239,7 @@ class SoftGroup(nn.Module):
                 "masks" : batch_gt_masks_list
             }
         }
-        
+
         # Hungarian Matching
         match_res = self.matcher(**matcher_data)
         
@@ -231,19 +255,24 @@ class SoftGroup(nn.Module):
 
         losses = {}
         # mask loss  (dice loss + focal loss are used in MaskFormer)
-        mask_loss = 0.
-        for i in range(n_batch):
-            # ce_loss = F.binary_cross_entropy_with_logits(paired_pred_mask[i].sigmoid(), paired_gt_mask[i])
-            mask_loss += sigmoid_focal_loss(paired_pred_mask[i], paired_gt_mask[i], paired_gt_mask[i].shape[1])
-        if n_batch > 0:
-            mask_loss /= n_batch
+        focal_loss = 0.
+        # ce_loss = 0.
+        d_loss = 0.
+        for i in range(batch_size):
+            # ce_loss += F.binary_cross_entropy_with_logits(paired_pred_mask[i].sigmoid(), paired_gt_mask[i])
+            focal_loss += sigmoid_focal_loss(paired_pred_mask[i], paired_gt_mask[i], paired_gt_mask[i].shape[1])
+            d_loss += dice_loss(paired_pred_mask[i].transpose(0,1), paired_gt_mask[i].transpose(0,1)) / paired_gt_mask[i].shape[1]
+        # ce_loss /= batch_size
+        d_loss /= batch_size
+        focal_loss /= batch_size
 
         # cls loss (cross entropy loss is used in MaskFormer)
         cls_loss = F.cross_entropy(paired_pred_cls, paired_gt_cls, ignore_index=self.ignore_label)
 
-        losses['mask_loss'] = mask_loss
+        # losses['ce_loss'] = ce_loss
+        losses['d_loss'] = d_loss
+        losses['focal_loss'] = focal_loss
         losses['cls_loss'] = cls_loss
-        # from pdb import set_trace; set_trace()
         return losses
 
 
@@ -318,26 +347,27 @@ class SoftGroup(nn.Module):
         feats = torch.cat((feats, coords_float), 1)
         voxel_feats = voxelization(feats, p2v_map)
         input = spconv.SparseConvTensor(voxel_feats, voxel_coords.int(), spatial_shape, batch_size)
-        semantic_scores, pt_offsets, mask_feats, output_feats = self.forward_backbone(
+        kernel_feats, mask_feats, output_feats = self.forward_backbone(
             input, v2p_map, x4_split=self.test_cfg.x4_split)
         if self.test_cfg.x4_split:
             coords_float = self.merge_4_parts(coords_float)
-            semantic_labels = self.merge_4_parts(semantic_labels)
+            # semantic_labels = self.merge_4_parts(semantic_labels)
             instance_labels = self.merge_4_parts(instance_labels)
-            pt_offset_labels = self.merge_4_parts(pt_offset_labels)
-        semantic_preds = semantic_scores.max(1)[1]
+            # pt_offset_labels = self.merge_4_parts(pt_offset_labels)
+        # semantic_preds = semantic_scores.max(1)[1]
         ret = dict(
             scan_id=scan_ids[0],
             coords_float=coords_float.cpu().numpy(),
-            semantic_preds=semantic_preds.cpu().numpy(),
             semantic_labels=semantic_labels.cpu().numpy(),
-            offset_preds=pt_offsets.cpu().numpy(),
             offset_labels=pt_offset_labels.cpu().numpy(),
             instance_labels=instance_labels.cpu().numpy())
         if not self.semantic_only:
             # pred_instances
-            pred_instances = self.get_instances_from_masks(scan_ids[0], mask_feats, semantic_scores)
-            # gt_instances = self.get_instances_from_gt(scan_ids[0], semantic_labels, instance_labels)
+            cls_scores, instance_feats = self.get_instance_features(kernel_feats, output_feats, batch_idxs, batch_size)
+            
+            mask_preds = self.get_mask_preds(instance_feats, mask_feats, batch_idxs)
+            
+            pred_instances = self.get_instances_from_masks(scan_ids[0], mask_preds, cls_scores)
             gt_instances = self.get_gt_instances(semantic_labels, instance_labels)
             ret.update(dict(pred_instances=pred_instances, gt_instances=gt_instances))
         return ret
@@ -350,12 +380,14 @@ class SoftGroup(nn.Module):
             output = self.input_conv(input)
             output = self.unet(output)
             output = self.output_layer(output)
-            output_feats = output.features[input_map.long()]
+            output_feats = output.features[input_map.long()] # nPoints, nDim
+        
 
-        semantic_scores = self.semantic_linear(output_feats)
-        pt_offsets = self.offset_linear(output_feats)
-        mask_feats = self.mask_linear(output_feats)
-        return semantic_scores, pt_offsets, mask_feats, output_feats 
+        if not self.semantic_only:
+            mask_feats = self.mask_linear(output_feats)
+            kernel_feats = self.kernel_linear(output_feats) # nPoints, nPro
+
+        return kernel_feats, mask_feats, output_feats 
 
     def forward_4_parts(self, x, input_map):
         """Helper function for s3dis: devide and forward 4 parts of a scene."""
@@ -429,60 +461,46 @@ class SoftGroup(nn.Module):
             instances.append(pred)
         return instances
 
-    @force_fp32(apply_to=('semantic_scores', 'mask_feats'))
-    def get_instances_from_masks(self, scan_id, mask_feats, semantic_scores):
-        # 生成proposal score & proposal cls id
-        mask_pred = torch.zeros_like(mask_feats, dtype=torch.int)
+    @force_fp32(apply_to=('mask_preds', 'cls_scores'))
+    def get_instances_from_masks(self, scan_id, mask_preds, cls_scores):
         
-        # nPoints, nProposals
-        mask_pred[mask_feats.sigmoid() > self.test_cfg.mask_score_thr]  = 1
-        norm_mask_pred = F.normalize(mask_pred.float(), p = 1, dim = 0).transpose(1, 0)
-
-        # nProposal, nClasses
-        score_map = torch.mm(norm_mask_pred, semantic_scores)
-        score_map = score_map.softmax(1)
-
-        score_pred, cls_pred = score_map.max(1)
+        mask_preds = torch.where(mask_preds.sigmoid() > self.test_cfg.mask_score_thr, 1, 0).int()
         
+        score_map = cls_scores.squeeze(0).softmax(-1)
+
+        score_pred, cls_pred = score_map.max(-1)
         
         # filter 1 score
         inds = score_pred > self.test_cfg.cls_score_thr
         cls_pred = cls_pred[inds]
         score_pred = score_pred[inds]
-        mask_pred = mask_pred[:, inds]
+        mask_preds = mask_preds[:, inds]
 
         # filter 2 num of points
-        npoint = mask_pred.sum(0)
+        npoint = mask_preds.sum(0)
         inds = npoint >= self.test_cfg.min_npoint
         cls_pred = cls_pred[inds]
         score_pred = score_pred[inds]
-        mask_pred = mask_pred[:, inds]
-
-        # filter 3 ignore label sem2ins
-        label_shift = self.semantic_classes - self.instance_classes
-        cls_pred = cls_pred - label_shift + 1
-        vaild_cls_inds = cls_pred >= 1
-        cls_pred = cls_pred[vaild_cls_inds]
-        score_pred = score_pred[vaild_cls_inds]
-        mask_pred = mask_pred[:, vaild_cls_inds]
+        mask_preds = mask_preds[:, inds]
 
         # sort
-        _, inds = cls_pred.sort()
+        _, inds = cls_pred.sort(0, descending=True)
         cls_pred = cls_pred[inds]
         score_pred = score_pred[inds]
-        mask_pred = mask_pred[:, inds]
+        mask_preds = mask_preds[:, inds]
+        
 
         cls_pred = cls_pred.cpu().numpy()
         score_pred = score_pred.cpu().numpy()
-        mask_pred = mask_pred.cpu().numpy()
+        mask_preds = mask_preds.cpu().numpy()
 
         instances = []
         for i in range(cls_pred.shape[0]):
             pred = {}
             pred['scan_id'] = scan_id
-            pred['label_id'] = cls_pred[i]
+            pred['label_id'] = cls_pred[i] + 1
             pred['conf'] = score_pred[i]
-            pred['pred_mask'] = rle_encode(mask_pred[:, i])
+            pred['pred_mask'] = rle_encode(mask_preds[:, i])
             instances.append(pred)
         return instances
 

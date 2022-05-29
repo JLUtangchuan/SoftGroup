@@ -8,6 +8,12 @@ import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from torch import nn
 
+def dice_score(inputs, targets):
+    inputs = inputs.sigmoid()
+    numerator = 2 * torch.matmul(inputs, targets.t())
+    denominator = (inputs * inputs).sum(-1)[:, None] + (targets * targets).sum(-1)
+    score = numerator / (denominator + 1e-4)
+    return score
 
 def batch_dice_loss(inputs, targets):
     """
@@ -90,7 +96,7 @@ class HungarianMatcher(nn.Module):
         """More memory-friendly matching"""
         # bs, num_queries = outputs["pred_logits"].shape[:2]
         bs = len(outputs["pred_logits"])
-        num_queries = outputs["pred_logits"][0].size(0)
+        
 
         # Work out the mask padding size
         # masks = [v["masks"] for v in targets]
@@ -101,7 +107,7 @@ class HungarianMatcher(nn.Module):
         
         # Iterate through batch size
         for b in range(bs):
-
+            num_queries = outputs["pred_logits"][b].size(0)
             out_prob = outputs["pred_logits"][b].softmax(-1)  # [num_queries, num_classes]
             out_mask = outputs["pred_masks"][b].transpose(0, 1)  # [num_queries, n_points]
 
@@ -111,7 +117,7 @@ class HungarianMatcher(nn.Module):
             # Compute the classification cost. Contrary to the loss, we don't use the NLL,
             # but approximate it in 1 - proba[target class].
             # The 1 is a constant that doesn't change the matching, it can be ommitted.
-            cost_class = -out_prob[:, tgt_ids]
+            cost_class = 1-out_prob[:, tgt_ids]
 
             # Downsample gt masks to save memory
             # tgt_mask = F.interpolate(tgt_mask[:, None], size=out_mask.shape[-2:], mode="nearest")
@@ -120,20 +126,21 @@ class HungarianMatcher(nn.Module):
             # out_mask = out_mask.flatten(1)  # [batch_size * num_queries, H*W]
             # tgt_mask = tgt_mask[:, 0].flatten(1)  # [num_total_targets, H*W]
 
+            # cost_mask = F.binary_cross_entropy(out_mask, tgt_mask)
             # Compute the focal loss between masks
-            cost_mask = batch_sigmoid_focal_loss(out_mask, tgt_mask)
+            # cost_mask = batch_sigmoid_focal_loss(out_mask, tgt_mask)
 
             # Compute the dice loss betwen masks
-            cost_dice = batch_dice_loss(out_mask, tgt_mask)
+            cost_dice = 1 - dice_score(out_mask, tgt_mask)
+            # cost_dice = batch_dice_loss(out_mask, tgt_mask)
 
             # Final cost matrix
             C = (
-                self.cost_mask * cost_mask
-                + self.cost_class * cost_class
+                # self.cost_mask * cost_mask
+                self.cost_class * cost_class
                 + self.cost_dice * cost_dice
             )
-            C = C.reshape(num_queries, -1).cpu()
-
+            C = C.cpu()
             indices.append(linear_sum_assignment(C))
         return [
             (torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64))
@@ -201,3 +208,14 @@ def sigmoid_focal_loss(inputs, targets, num_masks, alpha: float = 0.25, gamma: f
         loss = alpha_t * loss
 
     return loss.mean(0).sum() / num_masks
+
+def dice_loss(inputs, targets, reduction='sum'):
+    inputs = inputs.sigmoid()
+    assert inputs.shape == targets.shape
+    numerator = 2 * (inputs * targets).sum(1)
+    denominator = (inputs * inputs).sum(-1) + (targets * targets).sum(-1)
+    loss = 1 - (numerator) / (denominator + 1e-4)
+    
+    if reduction == 'none':
+        return loss
+    return loss.sum()
