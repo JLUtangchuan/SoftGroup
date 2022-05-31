@@ -95,7 +95,7 @@ def main():
     _, world_size = get_dist_info()
     progress_bar = tqdm(total=len(dataloader) * world_size, disable=not is_main_process())
     with torch.no_grad():
-        model = model.eval()
+        model.eval()
         for i, batch in enumerate(dataloader):
             result = model(batch)
             results.append(result)
@@ -106,9 +106,9 @@ def main():
         for res in results:
             scan_ids.append(res['scan_id'])
             coords.append(res['coords_float'])
-            sem_preds.append(res['semantic_preds'])
+            # sem_preds.append(res['semantic_preds'])
             sem_labels.append(res['semantic_labels'])
-            offset_preds.append(res['offset_preds'])
+            # offset_preds.append(res['offset_preds'])
             offset_labels.append(res['offset_labels'])
             inst_labels.append(res['instance_labels'])
             if not cfg.model.semantic_only:
@@ -118,11 +118,11 @@ def main():
             logger.info('Evaluate instance segmentation')
             scannet_eval = ScanNetEval(dataset.CLASSES)
             scannet_eval.evaluate(pred_insts, gt_insts)
-        logger.info('Evaluate semantic segmentation and offset MAE')
-        ignore_label = cfg.model.ignore_label
-        evaluate_semantic_miou(sem_preds, sem_labels, ignore_label, logger)
-        evaluate_semantic_acc(sem_preds, sem_labels, ignore_label, logger)
-        evaluate_offset_mae(offset_preds, offset_labels, inst_labels, ignore_label, logger)
+        # logger.info('Evaluate semantic segmentation and offset MAE')
+        # ignore_label = cfg.model.ignore_label
+        # evaluate_semantic_miou(sem_preds, sem_labels, ignore_label, logger)
+        # evaluate_semantic_acc(sem_preds, sem_labels, ignore_label, logger)
+        # evaluate_offset_mae(offset_preds, offset_labels, inst_labels, ignore_label, logger)
 
         # save output
         if not args.out:

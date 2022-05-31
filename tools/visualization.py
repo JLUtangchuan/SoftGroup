@@ -149,7 +149,7 @@ def get_coords_color(opt):
         # update variable to match scannet format
         opt.data_split = os.path.join('val', opt.data_split)
     else:
-        input_file = os.path.join('dataset', opt.dataset, opt.data_split,
+        input_file = os.path.join('../dataset', opt.dataset, opt.data_split,
                                   opt.room_name + '_inst_nostuff.pth')
         assert os.path.isfile(input_file), 'File not exist - {}.'.format(input_file)
         if opt.data_split == 'test':
@@ -169,7 +169,7 @@ def get_coords_color(opt):
 
     elif (opt.task == 'semantic_pred'):
         assert opt.data_split != 'train'
-        semantic_file = os.path.join(opt.prediction_path, opt.data_split, 'semantic',
+        semantic_file = os.path.join(opt.prediction_path, 'semantic_pred',
                                      opt.room_name + '.npy')
         assert os.path.isfile(semantic_file), 'No semantic result - {}.'.format(semantic_file)
         label_pred = np.load(semantic_file).astype(np.int)  # 0~19
@@ -210,7 +210,7 @@ def get_coords_color(opt):
     # same color order according to instance pointnum
     elif (opt.task == 'instance_pred'):
         assert opt.data_split != 'train'
-        instance_file = os.path.join(opt.prediction_path, opt.data_split, opt.room_name + '.txt')
+        instance_file = os.path.join(opt.prediction_path, 'pred_instance', opt.room_name + '.txt')
         assert os.path.isfile(instance_file), 'No instance result - {}.'.format(instance_file)
         f = open(instance_file, 'r')
         masks = f.readlines()
@@ -226,12 +226,12 @@ def get_coords_color(opt):
         sort_inds = np.argsort(scores)[::-1]
         for i_ in range(len(masks) - 1, -1, -1):
             i = sort_inds[i_]
-            mask_path = os.path.join(opt.prediction_path, opt.data_split, masks[i][0])
+            mask_path = os.path.join(opt.prediction_path, 'pred_instance', masks[i][0])
             assert os.path.isfile(mask_path), mask_path
             if (float(masks[i][2]) < 0.09):
                 continue
             mask = np.loadtxt(mask_path).astype(np.int)
-            if opt.dataset == 'scannet':
+            if opt.dataset == 'scannetv2':
                 print('{} {}: {} pointnum: {}'.format(i,
                                                       masks[i], SEMANTIC_IDX2NAME[int(masks[i][1])],
                                                       mask.sum()))
@@ -286,7 +286,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--dataset',
-        choices=['scannet', 's3dis'],
+        choices=['scannetv2', 's3dis'],
         help='dataset for visualization',
         default='scannet')
     parser.add_argument(
