@@ -161,7 +161,7 @@ def get_coords_color(opt):
 
     if (opt.task == 'semantic_gt'):
         assert opt.data_split != 'test'
-        label = label.astype(np.int)
+        label = label.astype(np.int32)
         label_rgb = np.zeros(rgb.shape)
         label_rgb[label >= 0] = np.array(
             itemgetter(*SEMANTIC_NAMES[label[label >= 0]])(CLASS_COLOR))
@@ -172,7 +172,7 @@ def get_coords_color(opt):
         semantic_file = os.path.join(opt.prediction_path, 'semantic_pred',
                                      opt.room_name + '.npy')
         assert os.path.isfile(semantic_file), 'No semantic result - {}.'.format(semantic_file)
-        label_pred = np.load(semantic_file).astype(np.int)  # 0~19
+        label_pred = np.load(semantic_file).astype(np.int32)  # 0~19
         label_pred_rgb = np.array(itemgetter(*SEMANTIC_NAMES[label_pred])(CLASS_COLOR))
         rgb = label_pred_rgb
 
@@ -181,7 +181,7 @@ def get_coords_color(opt):
         semantic_file = os.path.join(opt.prediction_path, opt.data_split, 'semantic',
                                      opt.room_name + '.npy')
         assert os.path.isfile(semantic_file), 'No semantic result - {}.'.format(semantic_file)
-        label_pred = np.load(semantic_file).astype(np.int)  # 0~19
+        label_pred = np.load(semantic_file).astype(np.int32)  # 0~19
         label_pred_rgb = np.array(itemgetter(*SEMANTIC_NAMES[label_pred])(CLASS_COLOR))
         rgb = label_pred_rgb
 
@@ -194,8 +194,8 @@ def get_coords_color(opt):
     # same color order according to instance pointnum
     elif (opt.task == 'instance_gt'):
         assert opt.data_split != 'test'
-        inst_label = inst_label.astype(np.int)
-        print('Instance number: {}'.format(inst_label.max() + 1))
+        inst_label = inst_label.astype(np.int32)
+        # print('Instance number: {}'.format(inst_label.max() + 1))
         inst_label_rgb = np.zeros(rgb.shape)
         ins_num = inst_label.max() + 1
         ins_pointnum = np.zeros(ins_num)
@@ -219,7 +219,7 @@ def get_coords_color(opt):
 
         ins_num = len(masks)
         ins_pointnum = np.zeros(ins_num)
-        inst_label = -100 * np.ones(rgb.shape[0]).astype(np.int)
+        inst_label = -100 * np.ones(rgb.shape[0]).astype(np.int32)
 
         # sort score such that high score has high priority for visualization
         scores = np.array([float(x[-1]) for x in masks])
@@ -230,13 +230,16 @@ def get_coords_color(opt):
             assert os.path.isfile(mask_path), mask_path
             if (float(masks[i][2]) < 0.09):
                 continue
-            mask = np.loadtxt(mask_path).astype(np.int)
-            if opt.dataset == 'scannetv2':
-                print('{} {}: {} pointnum: {}'.format(i,
-                                                      masks[i], SEMANTIC_IDX2NAME[int(masks[i][1])],
-                                                      mask.sum()))
-            else:
-                print('{} {}: pointnum: {}'.format(i, masks[i], mask.sum()))
+            mask = np.loadtxt(mask_path).astype(np.int32)
+            # try:
+            #     if opt.dataset == 'scannetv2':
+            #         print('{} {}: {} pointnum: {}'.format(i,
+            #                                             masks[i], int(masks[i][1]),
+            #                                             mask.sum()))
+            #     else:
+            #         print('{} {}: pointnum: {}'.format(i, masks[i], mask.sum()))
+            # except:
+            #     from ipdb import set_trace; set_trace()
             ins_pointnum[i] = mask.sum()
             inst_label[mask == 1] = i
         sort_idx = np.argsort(ins_pointnum)[::-1]

@@ -107,9 +107,9 @@ def main():
             scan_ids.append(res['scan_id'])
             coords.append(res['coords_float'])
             # sem_preds.append(res['semantic_preds'])
-            sem_labels.append(res['semantic_labels'])
+            # sem_labels.append(res['semantic_labels'])
             # offset_preds.append(res['offset_preds'])
-            offset_labels.append(res['offset_labels'])
+            # offset_labels.append(res['offset_labels'])
             inst_labels.append(res['instance_labels'])
             if not cfg.model.semantic_only:
                 pred_insts.append(res['pred_instances'])

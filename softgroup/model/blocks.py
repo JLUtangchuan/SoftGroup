@@ -21,10 +21,10 @@ class MLP(nn.Sequential):
     def init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
+                nn.init.kaiming_uniform_(m.weight)
                 nn.init.constant_(m.bias, 0)
-        nn.init.normal_(self[-1].weight, 0, 0.01)
-        nn.init.constant_(self[-1].bias, 0)
+        # nn.init.normal_(self[-1].weight, 0, 0.01)
+        # nn.init.constant_(self[-1].bias, 0)
 
 
 # current 1x1 conv in spconv2x has a bug. It will be removed after the bug is fixed

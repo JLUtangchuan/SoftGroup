@@ -2,7 +2,7 @@ import functools
 import os
 import os.path as osp
 from collections import OrderedDict
-from math import cos, pi
+from math import cos, pi, isnan
 
 import torch
 from torch import distributed as dist
@@ -45,10 +45,11 @@ class AverageMeter(object):
             return self.avg
 
     def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
+        if not isnan(val):
+            self.val = val  
+            self.sum += val * n
+            self.count += n
+            self.avg = self.sum / self.count
 
 
 # Epoch counts from 0 to N-1
