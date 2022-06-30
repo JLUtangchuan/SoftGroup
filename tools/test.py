@@ -8,6 +8,10 @@ import numpy as np
 import torch
 import yaml
 from munch import Munch
+
+import sys
+sys.path.insert(0, './')
+
 from softgroup.data import build_dataloader, build_dataset
 from softgroup.evaluation import (ScanNetEval, evaluate_offset_mae, evaluate_semantic_acc,
                                   evaluate_semantic_miou)
