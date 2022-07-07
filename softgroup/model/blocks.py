@@ -4,6 +4,7 @@ import spconv.pytorch as spconv
 import torch
 from spconv.pytorch.modules import SparseModule
 from torch import nn
+import torch.nn.functional as F
 
 
 class MLP(nn.Sequential):
@@ -141,3 +142,111 @@ class UBlock(nn.Module):
             output = output.replace_feature(out_feats)
             output = self.blocks_tail(output)
         return output
+
+class MaskDecoder(nn.Module):
+    def __init__(self, norm_fn, in_channels, num_proposal, out_channels, num_classes):
+        super().__init__()
+        self.in_channels = in_channels
+        self.num_proposal = num_proposal
+        self.out_channels = out_channels
+        self.num_classes = num_classes
+        
+        # conv network
+        self.out_conv = spconv.SparseSequential(
+            norm_fn(in_channels), nn.ReLU(),
+            Custom1x1Subm3d(in_channels, in_channels, kernel_size=1, bias=False),
+            norm_fn(in_channels), nn.ReLU(),
+            spconv.SubMConv3d(
+                in_channels,
+                in_channels,
+                kernel_size=3,
+                padding=1,
+                bias=False)
+        )
+        self.kernel_conv = spconv.SparseSequential(
+            norm_fn(in_channels), nn.ReLU(),
+            spconv.SubMConv3d(
+                in_channels,
+                in_channels,
+                kernel_size=3,
+                padding=1,
+                bias=False),
+            norm_fn(in_channels), nn.ReLU(),
+            spconv.SubMConv3d(
+                in_channels,
+                in_channels,
+                kernel_size=3,
+                padding=1,
+                bias=False),
+            norm_fn(in_channels), nn.ReLU(),
+            spconv.SubMConv3d(
+                in_channels,
+                num_proposal,
+                kernel_size=3,
+                padding=1,
+                bias=False)
+        )
+        
+        self.mask_conv = spconv.SparseSequential(
+            norm_fn(in_channels), nn.ReLU(),
+            spconv.SubMConv3d(
+                in_channels,
+                in_channels,
+                kernel_size=3,
+                padding=1,
+                bias=False),
+            norm_fn(in_channels), nn.ReLU(),
+            spconv.SubMConv3d(
+                in_channels,
+                in_channels,
+                kernel_size=3,
+                padding=1,
+                bias=False),
+            norm_fn(in_channels), nn.ReLU(),
+            spconv.SubMConv3d(
+                in_channels,
+                in_channels,
+                kernel_size=3,
+                padding=1,
+                bias=False)
+        )
+        self.instance_linear = MLP(in_channels, out_channels, norm_fn=norm_fn, num_layers=2)
+        self.cls_linear = MLP(in_channels, self.num_classes + 1, norm_fn=norm_fn, num_layers=2)
+
+    def forward(self, input, pos, input_map, batch_idxs, batch_size):
+        input = input.replace_feature(input.features + pos.features)
+        out_f = self.out_conv(input)
+        kernel_f = self.kernel_conv(out_f)
+        mask_f = self.mask_conv(out_f)
+        # SpTensor -> Tensor
+        kernel_feats = kernel_f.features[input_map.long()]
+        kernel_feats = torch.sigmoid(kernel_feats)
+        out_feats = out_f.features[input_map.long()]
+        mask_feats = mask_f.features[input_map.long()]
+        instance_feats = []
+        for i in range(batch_size):
+            batch_id_mask = batch_idxs == i
+            i_kernel_feats = kernel_feats.masked_fill(~batch_id_mask.unsqueeze(1), 0.)
+            # Normalize
+            i_kernel_feats = i_kernel_feats / batch_id_mask.sum()
+            i_out_feats = out_feats.masked_fill(~batch_id_mask.unsqueeze(1), 0.) # nPoints, nDim
+            # batched mm
+            i_ins_feats = torch.mm(i_kernel_feats.transpose(1, 0), i_out_feats) # nProposals, nDim
+            instance_feats.append(i_ins_feats)
+        # concat
+        instance_feats = torch.cat(instance_feats, dim=0) # bs*nProposals, nDim
+        # MLP
+        cls_scores = self.cls_linear(instance_feats)
+        instance_feats = self.instance_linear(instance_feats)
+        instance_feats = F.normalize(instance_feats, p=2, dim=-1)
+        instance_feats = instance_feats.reshape(batch_size, self.num_proposal, -1).transpose(1, 2)
+        cls_scores = cls_scores.reshape(batch_size, self.num_proposal, -1)
+        # mask
+        # instance_feats, 
+        mask_preds = mask_feats.new_full((mask_feats.shape[0], self.num_proposal), 0.)
+        for i in range(batch_size):
+            batch_id_mask = batch_idxs == i
+            i_mask_pred = torch.mm(mask_feats[batch_id_mask, :], instance_feats[i])
+            mask_preds[batch_id_mask, :] = i_mask_pred
+            
+        return mask_preds, cls_scores

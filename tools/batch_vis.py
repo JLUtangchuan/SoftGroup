@@ -14,8 +14,8 @@ from tqdm import tqdm
 
 tasks = ["input", "instance_gt", "instance_pred"]
 dataset = "scannetv2"
-prediction_path = "./exp/vis/maskv4"
-out_path = "./exp/vis/maskv4/out"
+prediction_path = "./exp/vis/maskv5"
+out_path = "./exp/vis/maskv5/out"
 
 def get_rooms(prediction_path, max_num = 50):
     _dir = os.path.join(prediction_path, "gt_instance")
