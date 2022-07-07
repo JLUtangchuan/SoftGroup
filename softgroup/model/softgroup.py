@@ -191,7 +191,7 @@ class SoftGroup(nn.Module):
     def instance_loss_for_mask(self, mask_preds, cls_scores, 
                                instance_labels, 
                                instance_cls, batch_idxs, 
-                               batch_size, instance_batch_idxs, return_gt_cls=False):
+                               batch_size, instance_batch_idxs):
         batch_pred_logits_list = []
         batch_pred_masks_list = []
         batch_gt_ins_labels_list = []
@@ -276,10 +276,8 @@ class SoftGroup(nn.Module):
         losses['d_loss'] = d_loss
         losses['focal_loss'] = focal_loss * 5.
         losses['cls_loss'] = cls_loss
-        if return_gt_cls:
-            return losses, gt_cls
-        else:
-            return losses
+        
+        return losses
 
     # 弃用
     @force_fp32(apply_to=('cls_scores', 'mask_scores', 'iou_scores'))
@@ -369,12 +367,7 @@ class SoftGroup(nn.Module):
         # pred_instances
         mask_preds, cls_scores = self.mask_decoder(output_feats, pos_feat, v2p_map, batch_idxs, batch_size)
         
-        instance_loss, gt_cls = self.instance_loss_for_mask(mask_preds, cls_scores, 
-                                                    instance_labels, 
-                                                    instance_cls, batch_idxs, 
-                                                    batch_size, instance_batch_idxs, return_gt_cls=True)
-        # from ipdb import set_trace; set_trace()
-        pred_instances = self.get_instances_from_masks(scan_ids[0], mask_preds, cls_scores, gt_cls)
+        pred_instances = self.get_instances_from_masks(scan_ids[0], mask_preds, cls_scores)
         # pred_instances = self.get_instances_from_gt(scan_ids[0], semantic_labels, instance_labels)
         gt_instances = self.get_gt_instances(semantic_labels, instance_labels)
         ret.update(dict(pred_instances=pred_instances, gt_instances=gt_instances))
@@ -467,14 +460,12 @@ class SoftGroup(nn.Module):
         return instances
 
     @force_fp32(apply_to=('mask_preds', 'cls_scores'))
-    def get_instances_from_masks(self, scan_id, mask_preds, cls_scores, gt_cls):
+    def get_instances_from_masks(self, scan_id, mask_preds, cls_scores):
         mask_preds = torch.where(mask_preds.sigmoid() > self.test_cfg.mask_score_thr, 1, 0).int()
 
         score_map = cls_scores.squeeze(0).softmax(-1)
 
         score_pred, cls_pred = score_map.max(-1)
-        cls_pred = gt_cls.squeeze(0)
-        score_pred = torch.ones_like(score_pred, dtype=torch.float)
 
         inds = cls_pred < self.instance_classes
         if inds.sum() == 0:
