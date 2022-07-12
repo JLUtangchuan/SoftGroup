@@ -59,23 +59,18 @@ class SoftGroup(nn.Module):
                 6, channels, kernel_size=3, padding=1, bias=False, indice_key='subm1'))
         block_channels = [channels * (i + 1) for i in range(num_blocks)]
         self.unet = UBlock(block_channels, norm_fn, 2, block, indice_key_id=1)
-        # self.output_layer = spconv.SparseSequential(norm_fn(channels), nn.ReLU())
+        self.output_layer = spconv.SparseSequential(norm_fn(channels), nn.ReLU())
 
         # point-wise prediction
-        # self.semantic_linear = MLP(channels, semantic_classes, norm_fn=norm_fn, num_layers=2)
-        # self.offset_linear = MLP(channels, 3, norm_fn=norm_fn, num_layers=2)
-
-        # matcher
-        self.matcher = HungarianMatcher(cost_dice = 10.0) # TODO loss系数分配规则需要调整
-        # topdown refinement path
-        if not semantic_only:
+        self.semantic_linear = MLP(channels, semantic_classes, norm_fn=norm_fn, num_layers=3)
+        self.offset_linear = MLP(channels, 3, norm_fn=norm_fn, num_layers=3)
+        
+        if not self.semantic_only:
+            # matcher
+            self.matcher = HungarianMatcher(cost_dice = 10.0) # TODO loss系数分配规则需要调整
+            # topdown refinement path
             self.pos_enc = PositionEmbeddingCoordsSine(d_pos=channels)
             self.mask_decoder = MaskDecoder(norm_fn, in_channels = channels, num_proposal = kernel_dim, out_channels = mask_dim, num_classes = self.instance_classes + 1)
-            # self.out_linear = MLP(channels, channels, norm_fn=norm_fn, num_layers=2)
-            # self.mask_linear = MLP(channels, self.mask_dim, norm_fn=norm_fn, num_layers=3)
-            # self.kernel_linear = MLP(channels, self.kernel_dim, norm_fn=norm_fn, num_layers=3)
-            # self.cls_linear = MLP(channels, self.instance_classes + 1, norm_fn=norm_fn, num_layers=2)
-            # self.instance_linear = MLP(channels, channels, norm_fn=norm_fn, num_layers=2)
 
         self.init_weights()
 
@@ -114,19 +109,23 @@ class SoftGroup(nn.Module):
         feats = torch.cat((feats, coords_float), 1)
         voxel_feats = voxelization(feats, p2v_map)
         input = spconv.SparseConvTensor(voxel_feats, voxel_coords.int(), spatial_shape, batch_size)
-        # semantic_scores, pt_offsets, kernel_feats, mask_feats, output_feats = self.forward_backbone(input, v2p_map)
-        pos_embed = self.pos_enc(coords_float)
-        pos_emb_feats = voxelization(pos_embed, p2v_map)
-        pos_feat = spconv.SparseConvTensor(pos_emb_feats, voxel_coords.int(), spatial_shape, batch_size)
         
-        output_feats = self.forward_backbone(input, v2p_map)
-        mask_preds, cls_scores = self.mask_decoder(output_feats, pos_feat, v2p_map, batch_idxs, batch_size)
-        # instance losses
-        instance_loss = self.instance_loss_for_mask(mask_preds, cls_scores, 
-                                                    instance_labels, 
-                                                    instance_cls, batch_idxs, 
-                                                    batch_size, instance_batch_idxs)
-        losses.update(instance_loss)
+        output_feats, semantic_scores, pt_offsets = self.forward_backbone(input, v2p_map)
+        # point-wise loss
+        point_wise_loss = self.point_wise_loss(semantic_scores, pt_offsets, semantic_labels,
+                                               instance_labels, pt_offset_labels)
+        losses.update(point_wise_loss)
+        if not self.semantic_only:
+            pos_embed = self.pos_enc(coords_float + pt_offsets)
+            pos_emb_feats = voxelization(pos_embed, p2v_map)
+            pos_feat = spconv.SparseConvTensor(pos_emb_feats, voxel_coords.int(), spatial_shape, batch_size)
+            mask_preds, cls_scores = self.mask_decoder(output_feats, pos_feat, v2p_map, batch_idxs, batch_size)
+            # instance losses
+            instance_loss = self.instance_loss_for_mask(mask_preds, cls_scores, 
+                                                        instance_labels, 
+                                                        instance_cls, batch_idxs, 
+                                                        batch_size, instance_batch_idxs)
+            losses.update(instance_loss)
         return self.parse_losses(losses)
 
     def point_wise_loss(self, semantic_scores, pt_offsets, semantic_labels, instance_labels,
@@ -353,10 +352,10 @@ class SoftGroup(nn.Module):
         input = spconv.SparseConvTensor(voxel_feats, voxel_coords.int(), spatial_shape, batch_size)
         # semantic_scores, pt_offsets, kernel_feats, mask_feats, output_feats = self.forward_backbone(
         #     input, v2p_map, x4_split=self.test_cfg.x4_split)
-        pos_embed = self.pos_enc(coords_float)
+        output_feats, semantic_scores, pt_offsets = self.forward_backbone(input, v2p_map, x4_split=self.test_cfg.x4_split)
+        pos_embed = self.pos_enc(coords_float + pt_offsets)
         pos_emb_feats = voxelization(pos_embed, p2v_map)
         pos_feat = spconv.SparseConvTensor(pos_emb_feats, voxel_coords.int(), spatial_shape, batch_size)
-        output_feats = self.forward_backbone(input, v2p_map, x4_split=self.test_cfg.x4_split)
         if self.test_cfg.x4_split:
             coords_float = self.merge_4_parts(coords_float)
             instance_labels = self.merge_4_parts(instance_labels)
@@ -367,7 +366,7 @@ class SoftGroup(nn.Module):
         # pred_instances
         mask_preds, cls_scores = self.mask_decoder(output_feats, pos_feat, v2p_map, batch_idxs, batch_size)
         
-        pred_instances = self.get_instances_from_masks(scan_ids[0], mask_preds, cls_scores)
+        pred_instances = self.get_instances_from_masks(scan_ids[0], mask_preds, cls_scores, semantic_scores)
         # pred_instances = self.get_instances_from_gt(scan_ids[0], semantic_labels, instance_labels)
         gt_instances = self.get_gt_instances(semantic_labels, instance_labels)
         ret.update(dict(pred_instances=pred_instances, gt_instances=gt_instances))
@@ -380,12 +379,11 @@ class SoftGroup(nn.Module):
         else:
             output = self.input_conv(input)
             output = self.unet(output)
-            # mask_preds, cls_scores = self.mask_decoder(output)
-            # output = self.output_layer(output)
-            # output_feats = output.features[input_map.long()] # nPoints, nDim
-            # output_feats = output_feats + pos_embed
-            # output_feats = self.out_linear(output_feats)
-        return output
+            output_ = self.output_layer(output)
+            output_feats = output_.features[input_map.long()] # nPoints, nDim
+        semantic_scores = self.semantic_linear(output_feats)
+        pt_offsets = self.offset_linear(output_feats)
+        return output, semantic_scores, pt_offsets
 
 
     def forward_4_parts(self, x, input_map):
@@ -460,14 +458,16 @@ class SoftGroup(nn.Module):
         return instances
 
     @force_fp32(apply_to=('mask_preds', 'cls_scores'))
-    def get_instances_from_masks(self, scan_id, mask_preds, cls_scores):
+    def get_instances_from_masks(self, scan_id, mask_preds, cls_scores, semantic_scores):
         mask_preds = torch.where(mask_preds.sigmoid() > self.test_cfg.mask_score_thr, 1, 0).int()
-
+        mask_cnts = mask_preds.sum(dim=0)
+        # score_map_ = (torch.mm(mask_preds.float().permute(1, 0), semantic_scores.sigmoid()) / (mask_cnts.unsqueeze(1) + 1e-6)).softmax(-1)
         score_map = cls_scores.squeeze(0).softmax(-1)
-
         score_pred, cls_pred = score_map.max(-1)
+        # score_pred, cls_pred = score_map_.max(-1)
+        # cls_pred = cls_pred - self.semantic_classes + self.instance_classes
 
-        inds = cls_pred < self.instance_classes
+        inds = torch.bitwise_and(cls_pred < self.instance_classes, cls_pred >= 0) 
         if inds.sum() == 0:
             return []
         cls_pred = cls_pred[inds]

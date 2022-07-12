@@ -4,7 +4,7 @@ model:
   semantic_classes: 20
   instance_classes: 18
   sem2ins_classes: []
-  semantic_only: False
+  semantic_only: True
   ignore_label: -100
   mask_dim: 32
   kernel_dim: 96 # nProposal
@@ -63,11 +63,11 @@ optimizer:
 save_cfg:
   semantic: False
   offset: False
-  instance: False
+  instance: True
 
 fp16: False
-epochs: 1000
-step_epoch: 300
+epochs: 200
+step_epoch: 50
 save_freq: 50
 pretrain: False
 work_dir: ''

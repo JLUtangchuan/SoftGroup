@@ -4,4 +4,4 @@ CHECK_POINT=$2
 GPUS=$3
 PORT=${PORT:-29502}
 
-CUDA_VISIBLE_DEVICES=1 OMP_NUM_THREADS=1 torchrun --nproc_per_node=$GPUS --master_port=$PORT  $(dirname "$0")/test.py $CONFIG $CHECK_POINT --dist ${@:4} --out ./exp/vis/maskv5
+CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 torchrun --nproc_per_node=$GPUS --master_port=$PORT  $(dirname "$0")/test.py $CONFIG $CHECK_POINT --dist ${@:4} --out ./exp/vis/maskv6_test_dist_$(date +%Y%m%d_%H%M%S)
